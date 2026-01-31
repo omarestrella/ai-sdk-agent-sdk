@@ -1,8 +1,7 @@
 {
   "name": "@omarestrella/ai-sdk-agent-sdk",
-  "version": "1.0.0-beta.2",
+  "version": "1.0.0-beta.4",
   "description": "AI SDK provider for the Agent SDK for OpenCode",
-  "homepage": "https://github.com/omarestrella/ai-sdk-agent-sdk",
   "keywords": [
     "agent-sdk",
     "ai-sdk",
@@ -10,6 +9,7 @@
     "claude",
     "opencode"
   ],
+  "homepage": "https://github.com/omarestrella/ai-sdk-agent-sdk",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -21,19 +21,19 @@
     "README.md"
   ],
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
   "exports": {
     ".": {
       "import": {
-        "types": "./dist/index.d.ts",
-        "default": "./dist/index.js"
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
       }
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "prepublishOnly": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build": "tsdown",
+    "prepublishOnly": "rm -rf dist && tsdown",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "fmt": "oxfmt",
@@ -48,11 +48,12 @@
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
-    "@types/consola": "^2.2.8",
     "@types/bun": "^1.3.8",
+    "@types/consola": "^2.2.8",
     "@types/node": "^25.1.0",
     "oxfmt": "^0.27.0",
     "oxlint": "^1.42.0",
+    "tsdown": "^0.20.1",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
