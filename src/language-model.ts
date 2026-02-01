@@ -91,9 +91,11 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
 
     const abortController = new AbortController();
     if (options.abortSignal) {
-      options.abortSignal.addEventListener("abort", () => {
-        abortController.abort();
-      });
+      options.abortSignal.addEventListener(
+        "abort",
+        abortController.abort.bind(abortController),
+        { once: true },
+      );
     }
 
     const queryOptions: Options = {
@@ -102,6 +104,7 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
       allowDangerouslySkipPermissions: true,
       abortController,
       tools: [],
+      maxTurns: 1,
       allowedTools: [`mcp__${AI_SDK_MCP_SERVER_NAME}__*`],
       ...(this.config.cwd ? { cwd: this.config.cwd } : {}),
     };
@@ -160,14 +163,14 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
       logger.debug("Resuming existing Claude session", {
         claudeSessionId: existingClaudeSessionId,
       });
-      (queryOptions as any).resume = existingClaudeSessionId;
+      queryOptions.resume = existingClaudeSessionId;
     } else {
       logger.debug("Starting new Claude session (no existing session found)");
     }
 
     const generator = query({
       prompt,
-      options: queryOptions as any,
+      options: queryOptions,
     });
 
     const content: LanguageModelV2Content[] = [];
@@ -183,26 +186,24 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
     // Per SDK docs: all messages with same ID have identical usage
     const seenMessageIds = new Set<string>();
 
-    let sessionId: string | undefined;
-    let sessionIdStored = false;
-
     for await (const message of generator) {
-      // Capture session ID from any message
-      if (!sessionId && (message as any).session_id) {
-        sessionId = (message as any).session_id as string;
-        logger.debug("Captured session ID:", { sessionId });
-
-        // Store the mapping from OpenCode session -> Claude session
-        // Only store if we didn't resume an existing session
-        if (!sessionIdStored && !existingClaudeSessionId) {
-          setClaudeSessionId(sessionId);
-          sessionIdStored = true;
-        }
+      if (
+        message.type === "system" &&
+        message.subtype === "init" &&
+        !existingClaudeSessionId
+      ) {
+        const claudeSessionID = message.session_id;
+        logger.debug("Starting Claude Session", {
+          sessionID: claudeSessionID,
+          model: message.model,
+          claudeCodeVersion: message.claude_code_version,
+        });
+        setClaudeSessionId(claudeSessionID);
       }
 
       if (message.type === "assistant") {
-        const apiMessage = message.message as any;
-        const messageId = (message as any).uuid as string | undefined;
+        const apiMessage = message.message;
+        const messageId = message.uuid;
 
         if (Array.isArray(apiMessage.content)) {
           for (const block of apiMessage.content) {
@@ -315,7 +316,7 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
 
     const generator = query({
       prompt,
-      options: queryOptions as any,
+      options: queryOptions,
     });
 
     let hasToolCalls = false;
@@ -572,12 +573,13 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                 usage: message.usage,
                 models: Object.keys(message.modelUsage),
               });
+              const messageUsage = message.usage;
               usage = {
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                totalTokens: usage.totalTokens,
-                cachedInputTokens: usage.cachedInputTokens,
-                reasoningTokens: usage.reasoningTokens,
+                inputTokens: messageUsage.input_tokens,
+                outputTokens: messageUsage.output_tokens,
+                totalTokens:
+                  messageUsage.input_tokens + messageUsage.output_tokens,
+                cachedInputTokens: messageUsage.cache_read_input_tokens,
               };
             }
           }
