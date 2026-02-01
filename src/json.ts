@@ -4,10 +4,7 @@ import { logger } from "./logger";
  * Safely serializes a value to JSON, handling circular references
  * by replacing them with `[Circular]`.
  */
-export function safeJsonStringify(
-  value: unknown,
-  space?: string | number,
-): string {
+export function safeJsonStringify(value: unknown, space?: string | number): string {
   const seen = new WeakSet();
 
   try {

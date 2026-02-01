@@ -4,14 +4,17 @@ import type {
   LanguageModelV2CallWarning,
   LanguageModelV2Content,
   LanguageModelV2FinishReason,
+  LanguageModelV2Message,
+  LanguageModelV2Prompt,
   LanguageModelV2StreamPart,
   LanguageModelV2Usage,
 } from "@ai-sdk/provider";
 import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
+import { registerExecution } from "./execution-registry";
 import { safeJsonStringify } from "./json";
-import { convertMessages } from "./messages";
 import { AI_SDK_MCP_SERVER_NAME, convertTools } from "./tools";
 import { logger } from "./logger";
+import { getClaudeSessionId, setClaudeSessionId } from "./context";
 
 /**
  * Strips the MCP prefix from tool names returned by the Agent SDK.
@@ -82,7 +85,8 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
   }
 
   private buildQueryOptions(options: LanguageModelV2CallOptions) {
-    const { systemPrompt, prompt } = convertMessages(options.prompt);
+    // Extract just the last user message as the prompt (Agent SDK manages conversation history)
+    const lastUserMessage = this.getLastUserMessage(options.prompt);
     const convertedTools = convertTools(options.tools as any);
 
     const abortController = new AbortController();
@@ -94,7 +98,6 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
 
     const queryOptions: Options = {
       model: this.modelId,
-      maxTurns: 1,
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
       abortController,
@@ -103,6 +106,8 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
       ...(this.config.cwd ? { cwd: this.config.cwd } : {}),
     };
 
+    // Extract system prompt from conversation history
+    const systemPrompt = this.extractSystemPrompt(options.prompt);
     if (systemPrompt) {
       queryOptions.systemPrompt = systemPrompt;
     }
@@ -113,12 +118,52 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
       };
     }
 
-    return { prompt, queryOptions };
+    return { prompt: lastUserMessage, queryOptions };
+  }
+
+  private getLastUserMessage(messages: LanguageModelV2Prompt): string {
+    // Find the last user message
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.role === "user") {
+        // User content is Array<LanguageModelV2TextPart | LanguageModelV2FilePart>
+        const userContent = message.content as Array<{
+          type: string;
+          text?: string;
+        }>;
+        // Concatenate all text parts
+        return userContent
+          .filter((part) => part.type === "text")
+          .map((part) => part.text || "")
+          .join("\n");
+      }
+    }
+    return "";
+  }
+
+  private extractSystemPrompt(
+    messages: LanguageModelV2Prompt,
+  ): string | undefined {
+    const systemMessages = messages
+      .filter((msg: LanguageModelV2Message) => msg.role === "system")
+      .map((msg) => (msg as { role: "system"; content: string }).content);
+    return systemMessages.length > 0 ? systemMessages.join("\n\n") : undefined;
   }
 
   async doGenerate(options: DoGenerateOptions): Promise<DoGenerateResult> {
     const warnings: LanguageModelV2CallWarning[] = [];
     const { prompt, queryOptions } = this.buildQueryOptions(options);
+
+    // Check if we have an existing Claude session to resume
+    const existingClaudeSessionId = getClaudeSessionId();
+    if (existingClaudeSessionId) {
+      logger.debug("Resuming existing Claude session", {
+        claudeSessionId: existingClaudeSessionId,
+      });
+      (queryOptions as any).resume = existingClaudeSessionId;
+    } else {
+      logger.debug("Starting new Claude session (no existing session found)");
+    }
 
     const generator = query({
       prompt,
@@ -138,7 +183,23 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
     // Per SDK docs: all messages with same ID have identical usage
     const seenMessageIds = new Set<string>();
 
+    let sessionId: string | undefined;
+    let sessionIdStored = false;
+
     for await (const message of generator) {
+      // Capture session ID from any message
+      if (!sessionId && (message as any).session_id) {
+        sessionId = (message as any).session_id as string;
+        logger.debug("Captured session ID:", { sessionId });
+
+        // Store the mapping from OpenCode session -> Claude session
+        // Only store if we didn't resume an existing session
+        if (!sessionIdStored && !existingClaudeSessionId) {
+          setClaudeSessionId(sessionId);
+          sessionIdStored = true;
+        }
+      }
+
       if (message.type === "assistant") {
         const apiMessage = message.message as any;
         const messageId = (message as any).uuid as string | undefined;
@@ -150,14 +211,25 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
             } else if (block.type === "tool_use") {
               hasToolCalls = true;
               const originalToolName = stripMcpPrefix(block.name);
+
+              // Register execution for this tool call
+              // MCP handler will wait for this to be resolved by the plugin
+              registerExecution(block.id, originalToolName, block.input);
+
+              // Inject _executionId into tool input for correlation
+              const inputWithId =
+                typeof block.input === "object" && block.input !== null
+                  ? { ...block.input, _executionId: block.id }
+                  : block.input;
+
               content.push({
                 type: "tool-call",
                 toolCallId: block.id,
                 toolName: originalToolName,
                 input:
-                  typeof block.input === "string"
-                    ? block.input
-                    : safeJsonStringify(block.input),
+                  typeof inputWithId === "string"
+                    ? inputWithId
+                    : safeJsonStringify(inputWithId),
               });
             } else if (block.type === "thinking") {
               content.push({
@@ -226,12 +298,24 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
     const warnings: LanguageModelV2CallWarning[] = [];
     const { prompt, queryOptions } = this.buildQueryOptions(options);
 
-    // Enable partial messages to get raw Anthropic streaming events
     queryOptions.includePartialMessages = true;
+
+    // Check if we have an existing Claude session to resume
+    const existingClaudeSessionId = getClaudeSessionId();
+    if (existingClaudeSessionId) {
+      logger.debug("Resuming existing Claude session in stream", {
+        claudeSessionId: existingClaudeSessionId,
+      });
+      queryOptions.resume = existingClaudeSessionId;
+    } else {
+      logger.debug(
+        "Starting new Claude session in stream (no existing session found)",
+      );
+    }
 
     const generator = query({
       prompt,
-      options: queryOptions,
+      options: queryOptions as any,
     });
 
     let hasToolCalls = false;
@@ -264,6 +348,19 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
 
         try {
           for await (const message of generator) {
+            if (message.type === "system" && message.subtype === "init") {
+              // We need to keep this session tied to the OpenCode session,
+              // so we can do a "resume" in the agent SDK
+              const claudeSessionID = message.session_id;
+              logger.debug("Starting Claude Session", {
+                sessionID: claudeSessionID,
+                model: message.model,
+                claudeCodeVersion: message.claude_code_version,
+              });
+              // Store the mapping from OpenCode session -> Claude session
+              setClaudeSessionId(claudeSessionID);
+            }
+
             if (message.type === "stream_event") {
               const event = message.event;
 
@@ -305,6 +402,12 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                   } else if (block?.type === "tool_use") {
                     hasToolCalls = true;
                     const id = block.id ?? generateId();
+                    const originalToolName = stripMcpPrefix(block.name);
+
+                    // Register execution for this tool call
+                    // MCP handler will wait for this to be resolved by the plugin
+                    registerExecution(id, originalToolName, {});
+
                     toolCalls.set(index, {
                       toolCallId: id,
                       toolName: block.name,
@@ -313,7 +416,7 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                     controller.enqueue({
                       type: "tool-input-start",
                       id,
-                      toolName: block.name,
+                      toolName: originalToolName,
                     });
                   } else if (block?.type === "thinking") {
                     activeReasoningId = generateId();
@@ -427,7 +530,7 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                 }
 
                 case "message_stop": {
-                  // Final streaming event
+                  logger.debug("Stream stopped");
                   break;
                 }
               }
@@ -435,8 +538,8 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
               // Full assistant message — only update finish reason, not usage
               // Usage is tracked from streaming events (message_start, message_delta)
               // Per SDK docs: assistant messages share usage with streaming events
-              const apiMessage = (message as any).message;
-              const messageId = (message as any).uuid as string | undefined;
+              const apiMessage = message.message;
+              const messageId = message.uuid;
 
               if (Array.isArray(apiMessage?.content)) {
                 for (const block of apiMessage.content) {
@@ -454,14 +557,6 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                 !seenMessageIds.has(messageId)
               ) {
                 seenMessageIds.add(messageId);
-                logger.debug(
-                  "Assistant message usage (already tracked from streaming)",
-                  {
-                    messageId,
-                    inputTokens: apiMessage.usage.input_tokens,
-                    outputTokens: apiMessage.usage.output_tokens,
-                  },
-                );
               }
 
               if (apiMessage?.stop_reason) {
@@ -471,18 +566,19 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                 );
               }
             } else if (message.type === "result") {
-              // Final result with cumulative usage from all steps
-              const result = message as any;
-              if (result.usage) {
-                usage.inputTokens =
-                  result.usage.input_tokens ?? usage.inputTokens;
-                usage.outputTokens =
-                  result.usage.output_tokens ?? usage.outputTokens;
-                logger.debug("Final usage from result message", {
-                  inputTokens: usage.inputTokens,
-                  outputTokens: usage.outputTokens,
-                });
-              }
+              logger.debug("Stream ended", {
+                subtype: message.subtype,
+                durationMs: message.duration_ms,
+                usage: message.usage,
+                models: Object.keys(message.modelUsage),
+              });
+              usage = {
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                totalTokens: usage.totalTokens,
+                cachedInputTokens: usage.cachedInputTokens,
+                reasoningTokens: usage.reasoningTokens,
+              };
             }
           }
         } catch (error) {
@@ -495,14 +591,6 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
         }
         if (activeReasoningId) {
           controller.enqueue({ type: "reasoning-end", id: activeReasoningId });
-        }
-
-        // Calculate total tokens if not already done
-        if (
-          usage.inputTokens !== undefined &&
-          usage.outputTokens !== undefined
-        ) {
-          usage.totalTokens = usage.inputTokens + usage.outputTokens;
         }
 
         controller.enqueue({

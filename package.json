@@ -48,6 +48,7 @@
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
+    "@opencode-ai/plugin": "^1.1.48",
     "@types/bun": "^1.3.8",
     "@types/consola": "^2.2.8",
     "@types/node": "^25.1.0",

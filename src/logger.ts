@@ -11,8 +11,7 @@ import { safeJsonStringify } from "./json";
 
 // Environment configuration
 const LOG_LEVEL = (process.env.LOG_LEVEL as string) || "debug";
-const LOG_DIR =
-  process.env.LOG_DIR || join(homedir(), ".cache", "ai-sdk-claude-agent");
+const LOG_DIR = process.env.LOG_DIR || join(homedir(), ".cache", "ai-sdk-claude-agent");
 const LOG_FILE = process.env.LOG_FILE || "ai-sdk-claude-agent.log";
 
 // Ensure log directory exists
@@ -77,9 +76,7 @@ async function loadConsola(): Promise<ConsolaInstance | null> {
           };
           const levelName = levelNames[logObj.level] || "LOG";
           const message = logObj.args
-            .map((arg) =>
-              typeof arg === "object" ? safeJsonStringify(arg) : String(arg),
-            )
+            .map((arg) => (typeof arg === "object" ? safeJsonStringify(arg) : String(arg)))
             .join(" ");
 
           const line =

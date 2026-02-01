@@ -1,8 +1,5 @@
 import type { LanguageModelV2 } from "@ai-sdk/provider";
-import {
-  ClaudeAgentLanguageModel,
-  type ClaudeAgentLanguageModelConfig,
-} from "./language-model";
+import { ClaudeAgentLanguageModel, type ClaudeAgentLanguageModelConfig } from "./language-model";
 import { safeJsonStringify } from "./json";
 import { logger } from "./logger";
 
@@ -21,9 +18,13 @@ export interface ClaudeAgentProvider {
   languageModel(modelId: string): LanguageModelV2;
 }
 
-export function createClaudeAgent(
-  options: ClaudeAgentProviderSettings = {},
-): ClaudeAgentProvider {
+export function createClaudeAgent(options: ClaudeAgentProviderSettings = {}): ClaudeAgentProvider {
+  // if called as a plugin, ignore, return {}
+  // hacky, but helps when using this repo as a plugin
+  if ("$" in options) {
+    return {} as any;
+  }
+
   const config: ClaudeAgentLanguageModelConfig = {
     provider: options.name ?? "claude-agent",
     cwd: options.cwd,

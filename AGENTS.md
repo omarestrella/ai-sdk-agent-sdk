@@ -29,6 +29,13 @@ bun run fmt                    # Format with oxfmt
 - Classes: `ClaudeAgentLanguageModel`
 - Constants: `AI_SDK_MCP_SERVER_NAME`
 - Private methods: camelCase (no underscore)
+- **Use `ID` not `Id` in compound variable names** (e.g., `userID`, `sessionID`). Standalone `id` is allowed.
+
+**Type Casting:**
+
+- **Never prematurely cast to `as any`** - properly type values first
+- Use `unknown` as an intermediate type when necessary, then narrow with type guards
+- Only use `as any` as a last resort with explanatory comments
 
 **Types:**
 
