@@ -1,5 +1,9 @@
 import type { LanguageModelV2FunctionTool } from "@ai-sdk/provider";
-import { createSdkMcpServer, tool, type McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import {
+  createSdkMcpServer,
+  tool,
+  type McpServerConfig,
+} from "@anthropic-ai/claude-agent-sdk";
 import * as z from "zod";
 import { waitForExecution } from "./execution-registry";
 import { logger } from "./logger";
@@ -15,7 +19,9 @@ export const AI_SDK_MCP_SERVER_NAME = "ai-sdk-tools";
  * Extracts Zod schema from AI SDK tool inputSchema using Zod 4's native
  * JSON Schema conversion.
  */
-function extractZodSchema(tool: LanguageModelV2FunctionTool): Record<string, z.ZodTypeAny> {
+function extractZodSchema(
+  tool: LanguageModelV2FunctionTool,
+): Record<string, z.ZodTypeAny> {
   const inputSchema = tool.inputSchema as Record<string, unknown> | undefined;
 
   if (!inputSchema || typeof inputSchema !== "object") {
@@ -66,43 +72,50 @@ export function convertTools(tools: LanguageModelV2FunctionTool[] | undefined):
       schemaKeys: Object.keys(zodSchema),
     });
 
-    return tool(aiTool.name, aiTool.description ?? "", zodSchema, async (args, extra) => {
-      // Extract tool call ID from extra (passed by Agent SDK via _meta)
-      // Extra brittle, can probably break in future Agent SDK changes
-      const meta = (extra as { _meta?: Record<string, unknown> })?._meta;
-      const toolCallId = meta?.["claudecode/toolUseId"] as string | undefined;
+    return tool(
+      aiTool.name,
+      aiTool.description ?? "",
+      zodSchema,
+      async (args, extra) => {
+        // Extract tool call ID from extra (passed by Agent SDK via _meta)
+        // Extra brittle, can probably break in future Agent SDK changes
+        const meta = (extra as { _meta?: Record<string, unknown> })?._meta;
+        const toolCallId = meta?.["claudecode/toolUseId"] as string | undefined;
 
-      if (!toolCallId) {
-        logger.error("No toolCallId in MCP handler extra", {
+        if (!toolCallId) {
+          logger.error("No toolCallId in MCP handler extra", {
+            toolName: aiTool.name,
+            extra,
+          });
+          return {
+            content: [
+              { type: "text" as const, text: "Error: Missing tool call ID" },
+            ],
+            isError: true,
+          };
+        }
+
+        logger.debug("MCP handler waiting for execution", {
           toolName: aiTool.name,
-          extra,
+          toolCallId,
         });
+
+        // Wait for execution to be registered by stream
+        // This blocks until the plugin hook resolves it
+        const result = await waitForExecution(toolCallId, aiTool.name, args);
+
+        logger.debug("MCP handler received tool result", {
+          toolName: aiTool.name,
+          toolCallId,
+          contentLength: result.content.length,
+        });
+
         return {
-          content: [{ type: "text" as const, text: "Error: Missing tool call ID" }],
-          isError: true,
+          content: result.content,
+          isError: result.isError,
         };
-      }
-
-      logger.debug("MCP handler waiting for execution", {
-        toolName: aiTool.name,
-        toolCallId,
-      });
-
-      // Wait for execution to be registered by stream
-      // This blocks until the plugin hook resolves it
-      const result = await waitForExecution(toolCallId, aiTool.name, args);
-
-      logger.debug("MCP handler received tool result", {
-        toolName: aiTool.name,
-        toolCallId,
-        contentLength: result.content.length,
-      });
-
-      return {
-        content: result.content,
-        isError: result.isError,
-      };
-    });
+      },
+    );
   });
 
   logger.info("Created MCP server with", mcpTools.length, "tools");
@@ -113,7 +126,9 @@ export function convertTools(tools: LanguageModelV2FunctionTool[] | undefined):
   });
 
   // Generate the allowed tool names with MCP prefix format
-  const allowedTools = tools.map((t) => `mcp__${AI_SDK_MCP_SERVER_NAME}__${t.name}`);
+  const allowedTools = tools.map(
+    (t) => `mcp__${AI_SDK_MCP_SERVER_NAME}__${t.name}`,
+  );
 
   logger.debug("Allowed tools:", allowedTools);
 

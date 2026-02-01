@@ -11,7 +11,6 @@ import type {
 } from "@ai-sdk/provider";
 import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
 import { registerExecution } from "./execution-registry";
-import { safeJsonStringify } from "./json";
 import { AI_SDK_MCP_SERVER_NAME, convertTools } from "./tools";
 import { logger } from "./logger";
 import { getClaudeSessionId, setClaudeSessionId } from "./context";
@@ -91,11 +90,9 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
 
     const abortController = new AbortController();
     if (options.abortSignal) {
-      options.abortSignal.addEventListener(
-        "abort",
-        abortController.abort.bind(abortController),
-        { once: true },
-      );
+      options.abortSignal.addEventListener("abort", abortController.abort.bind(abortController), {
+        once: true,
+      });
     }
 
     const queryOptions: Options = {
@@ -144,9 +141,7 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
     return "";
   }
 
-  private extractSystemPrompt(
-    messages: LanguageModelV2Prompt,
-  ): string | undefined {
+  private extractSystemPrompt(messages: LanguageModelV2Prompt): string | undefined {
     const systemMessages = messages
       .filter((msg: LanguageModelV2Message) => msg.role === "system")
       .map((msg) => (msg as { role: "system"; content: string }).content);
@@ -154,145 +149,8 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
   }
 
   async doGenerate(options: DoGenerateOptions): Promise<DoGenerateResult> {
-    const warnings: LanguageModelV2CallWarning[] = [];
-    const { prompt, queryOptions } = this.buildQueryOptions(options);
-
-    // Check if we have an existing Claude session to resume
-    const existingClaudeSessionId = getClaudeSessionId();
-    if (existingClaudeSessionId) {
-      logger.debug("Resuming existing Claude session", {
-        claudeSessionId: existingClaudeSessionId,
-      });
-      queryOptions.resume = existingClaudeSessionId;
-    } else {
-      logger.debug("Starting new Claude session (no existing session found)");
-    }
-
-    const generator = query({
-      prompt,
-      options: queryOptions,
-    });
-
-    const content: LanguageModelV2Content[] = [];
-    let usage: LanguageModelV2Usage = {
-      inputTokens: undefined,
-      outputTokens: undefined,
-      totalTokens: undefined,
-    };
-    let finishReason: LanguageModelV2FinishReason = "unknown";
-    let hasToolCalls = false;
-
-    // Track message UUIDs to avoid counting usage multiple times
-    // Per SDK docs: all messages with same ID have identical usage
-    const seenMessageIds = new Set<string>();
-
-    for await (const message of generator) {
-      if (
-        message.type === "system" &&
-        message.subtype === "init" &&
-        !existingClaudeSessionId
-      ) {
-        const claudeSessionID = message.session_id;
-        logger.debug("Starting Claude Session", {
-          sessionID: claudeSessionID,
-          model: message.model,
-          claudeCodeVersion: message.claude_code_version,
-        });
-        setClaudeSessionId(claudeSessionID);
-      }
-
-      if (message.type === "assistant") {
-        const apiMessage = message.message;
-        const messageId = message.uuid;
-
-        if (Array.isArray(apiMessage.content)) {
-          for (const block of apiMessage.content) {
-            if (block.type === "text") {
-              content.push({ type: "text", text: block.text });
-            } else if (block.type === "tool_use") {
-              hasToolCalls = true;
-              const originalToolName = stripMcpPrefix(block.name);
-
-              // Register execution for this tool call
-              // MCP handler will wait for this to be resolved by the plugin
-              registerExecution(block.id, originalToolName, block.input);
-
-              // Inject _executionId into tool input for correlation
-              const inputWithId =
-                typeof block.input === "object" && block.input !== null
-                  ? { ...block.input, _executionId: block.id }
-                  : block.input;
-
-              content.push({
-                type: "tool-call",
-                toolCallId: block.id,
-                toolName: originalToolName,
-                input:
-                  typeof inputWithId === "string"
-                    ? inputWithId
-                    : safeJsonStringify(inputWithId),
-              });
-            } else if (block.type === "thinking") {
-              content.push({
-                type: "reasoning",
-                text: block.thinking ?? "",
-              });
-            }
-          }
-
-          // Only record usage once per unique message ID
-          if (apiMessage.usage && messageId && !seenMessageIds.has(messageId)) {
-            seenMessageIds.add(messageId);
-            usage = {
-              inputTokens: apiMessage.usage.input_tokens,
-              outputTokens: apiMessage.usage.output_tokens,
-              totalTokens:
-                (apiMessage.usage.input_tokens ?? 0) +
-                (apiMessage.usage.output_tokens ?? 0),
-            };
-            logger.debug("Usage reported in doGenerate", {
-              messageId,
-              inputTokens: usage.inputTokens,
-              outputTokens: usage.outputTokens,
-              totalTokens: usage.totalTokens,
-            });
-          }
-
-          finishReason = mapFinishReason(apiMessage.stop_reason, hasToolCalls);
-        }
-      }
-
-      if (message.type === "result") {
-        // Result message contains cumulative usage from all steps
-        if (message.usage) {
-          usage = {
-            inputTokens: message.usage.input_tokens ?? usage.inputTokens,
-            outputTokens: message.usage.output_tokens ?? usage.outputTokens,
-            totalTokens: usage.totalTokens,
-          };
-          logger.debug("Final usage from result message", {
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-          });
-        }
-      }
-    }
-
-    // Calculate total tokens if we have both input and output
-    if (usage.inputTokens !== undefined && usage.outputTokens !== undefined) {
-      usage.totalTokens = usage.inputTokens + usage.outputTokens;
-    }
-
-    return {
-      content,
-      finishReason,
-      usage,
-      warnings,
-      request: { body: queryOptions },
-      response: {
-        headers: undefined,
-      },
-    };
+    const { stream, request } = await this.doStream(options);
+    return this.collectStream(stream, request ?? {});
   }
 
   async doStream(options: DoStreamOptions): Promise<DoStreamResult> {
@@ -309,9 +167,7 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
       });
       queryOptions.resume = existingClaudeSessionId;
     } else {
-      logger.debug(
-        "Starting new Claude session in stream (no existing session found)",
-      );
+      logger.debug("Starting new Claude session in stream (no existing session found)");
     }
 
     const generator = query({
@@ -338,10 +194,10 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
         let activeReasoningId: string | null = null;
 
         // Track tool calls being streamed (keyed by content block index)
-        const toolCalls: Map<
-          number,
-          { toolCallId: string; toolName: string; argsText: string }
-        > = new Map();
+        // Anthropic streaming API references blocks by index, not ID
+        // content_block_start gives us the ID, but deltas/stop only reference index
+        const toolCalls: Map<number, { toolCallId: string; toolName: string; argsText: string }> =
+          new Map();
 
         // Track message UUIDs to avoid counting usage multiple times
         // Per SDK docs: all messages with same ID have identical usage
@@ -379,12 +235,9 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                     });
                     if (msg.usage) {
                       usage.inputTokens = msg.usage.input_tokens;
-                      logger.debug(
-                        "Initial usage reported in doStream (message_start)",
-                        {
-                          inputTokens: usage.inputTokens,
-                        },
-                      );
+                      logger.debug("Initial usage reported in doStream (message_start)", {
+                        inputTokens: usage.inputTokens,
+                      });
                     }
                   }
                   break;
@@ -512,21 +365,14 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                   if (event.usage) {
                     usage.outputTokens = event.usage.output_tokens;
                     if (usage.inputTokens !== undefined) {
-                      usage.totalTokens =
-                        usage.inputTokens + (event.usage.output_tokens ?? 0);
+                      usage.totalTokens = usage.inputTokens + (event.usage.output_tokens ?? 0);
                     }
-                    logger.debug(
-                      "Usage delta reported in doStream (message_delta)",
-                      {
-                        outputTokens: usage.outputTokens,
-                        totalTokens: usage.totalTokens,
-                      },
-                    );
+                    logger.debug("Usage delta reported in doStream (message_delta)", {
+                      outputTokens: usage.outputTokens,
+                      totalTokens: usage.totalTokens,
+                    });
                   }
-                  finishReason = mapFinishReason(
-                    event.delta?.stop_reason,
-                    hasToolCalls,
-                  );
+                  finishReason = mapFinishReason(event.delta?.stop_reason, hasToolCalls);
                   break;
                 }
 
@@ -552,19 +398,12 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
 
               // Don't overwrite usage from streaming events - they are more accurate
               // and already tracked. Only log if this is a new message ID.
-              if (
-                apiMessage?.usage &&
-                messageId &&
-                !seenMessageIds.has(messageId)
-              ) {
+              if (apiMessage?.usage && messageId && !seenMessageIds.has(messageId)) {
                 seenMessageIds.add(messageId);
               }
 
               if (apiMessage?.stop_reason) {
-                finishReason = mapFinishReason(
-                  apiMessage.stop_reason,
-                  hasToolCalls,
-                );
+                finishReason = mapFinishReason(apiMessage.stop_reason, hasToolCalls);
               }
             } else if (message.type === "result") {
               logger.debug("Stream ended", {
@@ -577,8 +416,7 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
               usage = {
                 inputTokens: messageUsage.input_tokens,
                 outputTokens: messageUsage.output_tokens,
-                totalTokens:
-                  messageUsage.input_tokens + messageUsage.output_tokens,
+                totalTokens: messageUsage.input_tokens + messageUsage.output_tokens,
                 cachedInputTokens: messageUsage.cache_read_input_tokens,
               };
             }
@@ -610,6 +448,132 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
       request: { body: queryOptions },
       response: {
         headers: undefined,
+      },
+    };
+  }
+
+  private async collectStream(
+    stream: ReadableStream<LanguageModelV2StreamPart>,
+    request: { body?: unknown },
+  ): Promise<DoGenerateResult> {
+    const content: LanguageModelV2Content[] = [];
+    let usage: LanguageModelV2Usage = {
+      inputTokens: undefined,
+      outputTokens: undefined,
+      totalTokens: undefined,
+    };
+    let finishReason: LanguageModelV2FinishReason = "unknown";
+    let responseMetadata: { id?: string; modelId?: string; timestamp?: Date } = {};
+
+    // Buffers for accumulating delta parts
+    let currentText: string | null = null;
+    let currentReasoning: string | null = null;
+
+    const reader = stream.getReader();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        switch (value.type) {
+          case "stream-start":
+            // Warnings are passed through but not collected
+            break;
+
+          case "response-metadata":
+            responseMetadata = {
+              id: value.id,
+              modelId: value.modelId,
+              timestamp: value.timestamp,
+            };
+            break;
+
+          case "text-start":
+            currentText = "";
+            break;
+
+          case "text-delta":
+            if (currentText !== null) {
+              currentText += value.delta;
+            }
+            break;
+
+          case "text-end":
+            if (currentText !== null) {
+              content.push({ type: "text", text: currentText });
+              currentText = null;
+            }
+            break;
+
+          case "tool-call":
+            content.push({
+              type: "tool-call",
+              toolCallId: value.toolCallId,
+              toolName: value.toolName,
+              input: value.input,
+            });
+            break;
+
+          case "reasoning-start":
+            currentReasoning = "";
+            break;
+
+          case "reasoning-delta":
+            if (currentReasoning !== null) {
+              currentReasoning += value.delta;
+            }
+            break;
+
+          case "reasoning-end":
+            if (currentReasoning !== null) {
+              content.push({ type: "reasoning", text: currentReasoning });
+              currentReasoning = null;
+            }
+            break;
+
+          case "finish":
+            finishReason = value.finishReason;
+            if (value.usage) {
+              usage = value.usage;
+            }
+            break;
+
+          case "error":
+            // Throw on error parts rather than silently dropping them
+            throw value.error;
+
+          default:
+            // Ignore other part types (tool-input-start/end/delta, etc.)
+            break;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    // Flush any remaining buffers (in case stream didn't end properly)
+    if (currentText !== null) {
+      content.push({ type: "text", text: currentText });
+    }
+    if (currentReasoning !== null) {
+      content.push({ type: "reasoning", text: currentReasoning });
+    }
+
+    // Calculate total tokens
+    if (usage.inputTokens !== undefined && usage.outputTokens !== undefined) {
+      usage.totalTokens = usage.inputTokens + usage.outputTokens;
+    }
+
+    return {
+      content,
+      finishReason,
+      usage,
+      warnings: [], // Warnings from stream-start are not used
+      request,
+      response: {
+        headers: undefined,
+        ...responseMetadata,
       },
     };
   }

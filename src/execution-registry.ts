@@ -1,5 +1,21 @@
 import { logger } from "./logger";
 
+/**
+ * We have a weird pattern here. The Agent SDK:
+ *  - makes you provide an in-process mcp server for custom tools
+ *  - executes tools outside of opencodes ai-sdk loop
+ * This means we have a timing mismatch, causing the MCP handler
+ * to return before the tool actually runs.
+ *
+ * This registry bridges the two execution models:
+ * 1. Stream sees tool_use and registers a pending execution (by ID)
+ * 2. MCP handler blocks waiting for that execution to resolve
+ * 3. Plugin hook fires when OpenCode finishes, resolving the execution
+ * 4. MCP handler unblocks and returns the actual result to Agent SDK
+ *
+ * Open to another pattern, but this sort of works for now.
+ */
+
 export interface ToolResult {
   content: Array<{
     type: "text";
@@ -49,7 +65,7 @@ export function registerExecution(
       rejectFn(new Error(`Tool execution timeout: ${toolName}`));
       logger.error("Tool execution timed out", { toolName, id });
     }
-  }, 30000);
+  }, 120_000);
 
   // Store in registry
   pendingExecutions.set(id, {
@@ -64,19 +80,6 @@ export function registerExecution(
   });
 
   return promise;
-}
-
-/**
- * Gets a pending execution promise for the MCP handler to wait on.
- * Returns undefined if not found (execution hasn't been registered yet).
- */
-export function getExecutionPromise(id: string): Promise<ToolResult> | undefined {
-  const execution = pendingExecutions.get(id);
-  if (!execution) {
-    logger.warn("Execution not found when getting promise", { id });
-    return undefined;
-  }
-  return execution.promise;
 }
 
 /**

@@ -15,6 +15,10 @@ export const ToolPlugin: Plugin = async () => {
       }
     },
 
+    ["tool.execute.error" as any]: () => {
+      // TODO: this needs to be added to opencode to suport catching errors and resolving tool calls
+    },
+
     "tool.execute.after": async (input, output) => {
       const toolID = input.callID;
       const toolName = input.tool;
@@ -22,21 +26,24 @@ export const ToolPlugin: Plugin = async () => {
 
       // Extract execution ID from output metadata
       // The _executionId was injected by the stream when it saw the tool_use
-      // Note: OpenCode should preserve and return this in metadata
-      const executionId = (output.metadata as { _executionId?: string })?._executionId || toolID;
+      const executionId =
+        (output.metadata as { _executionId?: string })?._executionId || toolID;
 
       logger.debug("Tool executed hook fired", {
         toolID,
         toolName,
         executionId,
-        hasResult: result != null,
+        result,
       });
 
       if (!executionId) {
-        logger.warn("No executionId found in metadata - tool may not be managed by bridge", {
-          toolName,
-          toolID,
-        });
+        logger.warn(
+          "No executionId found in metadata - tool may not be managed by bridge",
+          {
+            toolName,
+            toolID,
+          },
+        );
         return;
       }
 
