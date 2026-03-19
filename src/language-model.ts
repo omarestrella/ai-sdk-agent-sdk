@@ -160,12 +160,12 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
     queryOptions.includePartialMessages = true;
 
     // Check if we have an existing Claude session to resume
-    const existingClaudeSessionId = getClaudeSessionId();
-    if (existingClaudeSessionId) {
+    const existingClaudeSessionID = getClaudeSessionId();
+    if (existingClaudeSessionID) {
       logger.debug("Resuming existing Claude session in stream", {
-        claudeSessionId: existingClaudeSessionId,
+        claudeSessionId: existingClaudeSessionID,
       });
-      queryOptions.resume = existingClaudeSessionId;
+      queryOptions.resume = existingClaudeSessionID;
     } else {
       logger.debug("Starting new Claude session in stream (no existing session found)");
     }
@@ -189,19 +189,19 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
         };
 
         // Track active text block for start/delta/end lifecycle
-        let activeTextId: string | null = null;
+        let activeTextID: string | null = null;
         // Track active reasoning block
-        let activeReasoningId: string | null = null;
+        let activeReasoningID: string | null = null;
 
         // Track tool calls being streamed (keyed by content block index)
         // Anthropic streaming API references blocks by index, not ID
         // content_block_start gives us the ID, but deltas/stop only reference index
-        const toolCalls: Map<number, { toolCallId: string; toolName: string; argsText: string }> =
+        const toolCalls: Map<number, { toolCallID: string; toolName: string; argsText: string }> =
           new Map();
 
         // Track message UUIDs to avoid counting usage multiple times
         // Per SDK docs: all messages with same ID have identical usage
-        const seenMessageIds = new Set<string>();
+        const seenMessageIDs = new Set<string>();
 
         try {
           for await (const message of generator) {
@@ -248,10 +248,10 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                   const index = event.index as number;
 
                   if (block?.type === "text") {
-                    activeTextId = generateId();
+                    activeTextID = generateId();
                     controller.enqueue({
                       type: "text-start",
-                      id: activeTextId,
+                      id: activeTextID,
                     });
                   } else if (block?.type === "tool_use") {
                     hasToolCalls = true;
@@ -263,7 +263,7 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                     registerExecution(id, originalToolName, {});
 
                     toolCalls.set(index, {
-                      toolCallId: id,
+                      toolCallID: id,
                       toolName: block.name,
                       argsText: "",
                     });
@@ -273,10 +273,10 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                       toolName: originalToolName,
                     });
                   } else if (block?.type === "thinking") {
-                    activeReasoningId = generateId();
+                    activeReasoningID = generateId();
                     controller.enqueue({
                       type: "reasoning-start",
-                      id: activeReasoningId,
+                      id: activeReasoningID,
                     });
                   }
                   break;
@@ -287,16 +287,16 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                   const index = event.index as number;
 
                   if (delta?.type === "text_delta") {
-                    if (!activeTextId) {
-                      activeTextId = generateId();
+                    if (!activeTextID) {
+                      activeTextID = generateId();
                       controller.enqueue({
                         type: "text-start",
-                        id: activeTextId,
+                        id: activeTextID,
                       });
                     }
                     controller.enqueue({
                       type: "text-delta",
-                      id: activeTextId,
+                      id: activeTextID,
                       delta: delta.text,
                     });
                   } else if (delta?.type === "input_json_delta") {
@@ -305,21 +305,21 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                       tc.argsText += delta.partial_json;
                       controller.enqueue({
                         type: "tool-input-delta",
-                        id: tc.toolCallId,
+                        id: tc.toolCallID,
                         delta: delta.partial_json,
                       });
                     }
                   } else if (delta?.type === "thinking_delta") {
-                    if (!activeReasoningId) {
-                      activeReasoningId = generateId();
+                    if (!activeReasoningID) {
+                      activeReasoningID = generateId();
                       controller.enqueue({
                         type: "reasoning-start",
-                        id: activeReasoningId,
+                        id: activeReasoningID,
                       });
                     }
                     controller.enqueue({
                       type: "reasoning-delta",
-                      id: activeReasoningId,
+                      id: activeReasoningID,
                       delta: delta.thinking,
                     });
                   }
@@ -335,28 +335,28 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
                     // End the tool input stream
                     controller.enqueue({
                       type: "tool-input-end",
-                      id: tc.toolCallId,
+                      id: tc.toolCallID,
                     });
                     // Emit the complete tool call
                     controller.enqueue({
                       type: "tool-call",
-                      toolCallId: tc.toolCallId,
+                      toolCallId: tc.toolCallID,
                       toolName: originalToolName,
                       input: tc.argsText,
                     });
                     toolCalls.delete(index);
-                  } else if (activeTextId) {
+                  } else if (activeTextID) {
                     controller.enqueue({
                       type: "text-end",
-                      id: activeTextId,
+                      id: activeTextID,
                     });
-                    activeTextId = null;
-                  } else if (activeReasoningId) {
+                    activeTextID = null;
+                  } else if (activeReasoningID) {
                     controller.enqueue({
                       type: "reasoning-end",
-                      id: activeReasoningId,
+                      id: activeReasoningID,
                     });
-                    activeReasoningId = null;
+                    activeReasoningID = null;
                   }
                   break;
                 }
@@ -386,7 +386,7 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
               // Usage is tracked from streaming events (message_start, message_delta)
               // Per SDK docs: assistant messages share usage with streaming events
               const apiMessage = message.message;
-              const messageId = message.uuid;
+              const messageID = message.uuid;
 
               if (Array.isArray(apiMessage?.content)) {
                 for (const block of apiMessage.content) {
@@ -398,8 +398,8 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
 
               // Don't overwrite usage from streaming events - they are more accurate
               // and already tracked. Only log if this is a new message ID.
-              if (apiMessage?.usage && messageId && !seenMessageIds.has(messageId)) {
-                seenMessageIds.add(messageId);
+              if (apiMessage?.usage && messageID && !seenMessageIDs.has(messageID)) {
+                seenMessageIDs.add(messageID);
               }
 
               if (apiMessage?.stop_reason) {
@@ -426,11 +426,11 @@ export class ClaudeAgentLanguageModel implements LanguageModelV2 {
         }
 
         // Close any dangling blocks
-        if (activeTextId) {
-          controller.enqueue({ type: "text-end", id: activeTextId });
+        if (activeTextID) {
+          controller.enqueue({ type: "text-end", id: activeTextID });
         }
-        if (activeReasoningId) {
-          controller.enqueue({ type: "reasoning-end", id: activeReasoningId });
+        if (activeReasoningID) {
+          controller.enqueue({ type: "reasoning-end", id: activeReasoningID });
         }
 
         controller.enqueue({

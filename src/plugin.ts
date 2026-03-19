@@ -25,25 +25,21 @@ export const ToolPlugin: Plugin = async () => {
       const result = output.output;
 
       // Extract execution ID from output metadata
-      // The _executionId was injected by the stream when it saw the tool_use
-      const executionId =
-        (output.metadata as { _executionId?: string })?._executionId || toolID;
+      // The _executionID was injected by the stream when it saw the tool_use
+      const executionID = (output.metadata as { _executionID?: string })?._executionID || toolID;
 
       logger.debug("Tool executed hook fired", {
         toolID,
         toolName,
-        executionId,
+        executionID,
         result,
       });
 
-      if (!executionId) {
-        logger.warn(
-          "No executionId found in metadata - tool may not be managed by bridge",
-          {
-            toolName,
-            toolID,
-          },
-        );
+      if (!executionID) {
+        logger.warn("No executionID found in metadata - tool may not be managed by bridge", {
+          toolName,
+          toolID,
+        });
         return;
       }
 
@@ -55,16 +51,16 @@ export const ToolPlugin: Plugin = async () => {
       };
 
       // Resolve the pending execution - this unblocks the MCP handler!
-      const success = resolveExecution(executionId, toolResult);
+      const success = resolveExecution(executionID, toolResult);
 
       if (!success) {
         logger.error("Failed to resolve execution - execution not found", {
-          executionId,
+          executionID,
           toolName,
         });
       } else {
         logger.debug("Successfully resolved tool execution", {
-          executionId,
+          executionID,
           toolName,
         });
       }
